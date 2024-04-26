@@ -31,6 +31,21 @@ string Exception::ToJSON(ExceptionType type, const string &message) {
 	return ToJSON(type, message, extra_info);
 }
 
+vector<string> GetStackPointers(int max_depth = 120) {
+#ifdef DUCKDB_DEBUG_STACKTRACE
+	auto callstack = std::unique_ptr<void *[]>(new void *[max_depth]);
+	u_long frames = static_cast<u_long>(backtrace(callstack.get(), max_depth));
+	auto pointers = std::vector<string>();
+	for (u_long i = 0; i < frames; i++) {
+		pointers.push_back(std::to_string(reinterpret_cast<size_t>(callstack[i])));
+	}
+
+	return pointers;
+#else
+	return {};
+#endif
+}
+
 string Exception::ToJSON(ExceptionType type, const string &message, const unordered_map<string, string> &extra_info) {
 #ifdef DUCKDB_DEBUG_STACKTRACE
 	auto extended_extra_info = extra_info;
@@ -92,20 +107,6 @@ string Exception::GetStackTrace(int max_depth) {
 #endif
 }
 
-vector<string> GetStackPointers(int max_depth) {
-#ifdef DUCKDB_DEBUG_STACKTRACE
-	auto callstack = std::unique_ptr<void *[]>(new void *[max_depth]);
-	u_long frames = static_cast<u_long>(backtrace(callstack.get(), max_depth));
-	auto pointers = std::vector<string>();
-	for (u_long i = 0; i < frames; i++) {
-		pointers.push_back(std::to_string(reinterpret_cast<size_t>(callstack[i])));
-	}
-
-	return pointers;
-#else
-	return {};
-#endif
-}
 
 string Exception::ConstructMessageRecursive(const string &msg, std::vector<ExceptionFormatValue> &values) {
 #ifdef DEBUG
