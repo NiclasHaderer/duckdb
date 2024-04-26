@@ -52,6 +52,7 @@ public:
 	DUCKDB_API void AddQueryLocation(QueryErrorContext error_context);
 	DUCKDB_API void AddQueryLocation(const ParsedExpression &ref);
 	DUCKDB_API void AddQueryLocation(const TableRef &ref);
+	DUCKDB_API string GetStackTrace();
 
 private:
 	//! Whether this ErrorData contains an exception or not

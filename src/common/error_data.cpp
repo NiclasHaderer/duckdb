@@ -115,4 +115,29 @@ void ErrorData::AddQueryLocation(const TableRef &ref) {
 	AddQueryLocation(ref.query_location);
 }
 
+string ErrorData::GetStackTrace() {
+#ifdef DUCKDB_DEBUG_STACKTRACE
+	auto stack_pointers_str = extra_info["stack_pointers"];
+
+	auto parsed_pointers = StringUtil::Split(stack_pointers_str, ',');
+	auto frame_count = parsed_pointers.size();
+	std::vector<void *> callstack(frame_count);
+	void **callstack_data = callstack.data();
+	for (idx_t i = 0; i < frame_count; i++) {
+		callstack_data[i] = reinterpret_cast<void *>(std::stoull(parsed_pointers[i]));
+	}
+
+	string result = "";
+	char **strs = backtrace_symbols(callstack_data, static_cast<int>(frame_count));
+	for (size_t i = 0; i < frame_count; i++) {
+		result += strs[i];
+		result += "\n";
+	}
+	free(strs);
+	return "\n" + result;
+#else
+	return "";
+#endif
+}
+
 } // namespace duckdb
