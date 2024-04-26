@@ -92,7 +92,7 @@ string Exception::GetStackTrace(int max_depth) {
 #endif
 }
 
-std::vector<string> Exception::GetStackPointers(int max_depth) {
+vector<string> GetStackPointers(int max_depth) {
 #ifdef DUCKDB_DEBUG_STACKTRACE
 	auto callstack = std::unique_ptr<void *[]>(new void *[max_depth]);
 	u_long frames = static_cast<u_long>(backtrace(callstack.get(), max_depth));

@@ -141,9 +141,6 @@ public:
 	}
 
 	DUCKDB_API static void SetQueryLocation(optional_idx error_location, unordered_map<string, string> &extra_info);
-
-private:
-	std::vector<string> static GetStackPointers(int max_depth = 120);
 };
 
 //===--------------------------------------------------------------------===//
