@@ -297,7 +297,7 @@ string CachingFileSystemWrapper::PathSeparator(const string &path) {
 	return underlying_file_system.PathSeparator(path);
 }
 
-vector<OpenFileInfo> CachingFileSystemWrapper::Glob(const string &path, FileOpener *opener) {
+unique_ptr<MultiFileList> CachingFileSystemWrapper::Glob(const string &path, FileOpener *opener) {
 	return underlying_file_system.Glob(path, opener);
 }
 

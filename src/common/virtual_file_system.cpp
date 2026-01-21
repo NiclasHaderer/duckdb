@@ -6,6 +6,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/caching_file_system_wrapper.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 
 namespace duckdb {
 
@@ -169,7 +170,7 @@ string VirtualFileSystem::PathSeparator(const string &path) {
 	return FindFileSystem(path).PathSeparator(path);
 }
 
-vector<OpenFileInfo> VirtualFileSystem::Glob(const string &path, FileOpener *opener) {
+GlobMultiFileList VirtualFileSystem::Glob(const string &path, FileOpener *opener) {
 	return FindFileSystem(path, opener).Glob(path, opener);
 }
 

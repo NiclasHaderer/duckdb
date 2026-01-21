@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/file_system.hpp"
+#include "multi_file/multi_file_list.hpp"
 
 namespace duckdb {
 
@@ -128,7 +129,7 @@ public:
 		return GetFileSystem().PathSeparator(path);
 	}
 
-	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override {
+	unique_ptr<MultiFileList> Glob(const string &path, FileOpener *opener = nullptr) override {
 		VerifyNoOpener(opener);
 		VerifyCanAccessFile(path);
 		return GetFileSystem().Glob(path, GetOpener().get());

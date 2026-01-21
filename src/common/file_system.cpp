@@ -13,6 +13,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/windows_util.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/operator/multiply.hpp"
 #include "duckdb/logging/log_manager.hpp"
 
@@ -599,7 +600,7 @@ bool FileSystem::HasGlob(const string &str) {
 	return false;
 }
 
-vector<OpenFileInfo> FileSystem::Glob(const string &path, FileOpener *opener) {
+unique_ptr<MultiFileList> FileSystem::Glob(const string &path, FileOpener *opener) {
 	throw NotImplementedException("%s: Glob is not implemented!", GetName());
 }
 
@@ -639,9 +640,10 @@ bool FileSystem::CanHandleFile(const string &fpath) {
 	throw NotImplementedException("%s: CanHandleFile is not implemented!", GetName());
 }
 
-vector<OpenFileInfo> FileSystem::GlobFiles(const string &pattern, ClientContext &context, const FileGlobInput &input) {
+unique_ptr<MultiFileList> FileSystem::GlobFiles(const string &pattern, ClientContext &context,
+                                                const FileGlobInput &input) {
 	auto result = Glob(pattern);
-	if (result.empty()) {
+	if (result->IsEmpty()) {
 		if (input.behavior == FileGlobOptions::FALLBACK_GLOB && !HasGlob(pattern)) {
 			// if we have no glob in the pattern and we have an extension, we try to glob
 			if (!HasGlob(pattern)) {
@@ -650,7 +652,7 @@ vector<OpenFileInfo> FileSystem::GlobFiles(const string &pattern, ClientContext 
 				}
 				string new_pattern = JoinPath(JoinPath(pattern, "**"), "*." + input.extension);
 				result = GlobFiles(new_pattern, context, FileGlobOptions::ALLOW_EMPTY);
-				if (!result.empty()) {
+				if (!result->IsEmpty()) {
 					// we found files by globbing the target as if it was a directory - return them
 					return result;
 				}

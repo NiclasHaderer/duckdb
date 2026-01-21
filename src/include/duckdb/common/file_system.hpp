@@ -8,19 +8,14 @@
 
 #pragma once
 
-#include "duckdb/common/common.hpp"
 #include "duckdb/common/enums/file_compression_type.hpp"
 #include "duckdb/common/enums/file_glob_options.hpp"
-#include "duckdb/common/exception.hpp"
-#include "duckdb/common/error_data.hpp"
-#include "duckdb/common/file_buffer.hpp"
 #include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/open_file_info.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/types/value.hpp"
-#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/vector.hpp"
 
 #include <functional>
@@ -38,6 +33,7 @@ class FileSystem;
 class Logger;
 class ClientContext;
 class QueryContext;
+class MultiFileList;
 
 enum class FileType {
 	//! Regular file
@@ -250,9 +246,9 @@ public:
 	//! Whether there is a glob in the string
 	DUCKDB_API static bool HasGlob(const string &str);
 	//! Runs a glob on the file system, returning a list of matching files
-	DUCKDB_API virtual vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr);
-	DUCKDB_API vector<OpenFileInfo> GlobFiles(const string &path, ClientContext &context,
-	                                          const FileGlobInput &input = FileGlobOptions::DISALLOW_EMPTY);
+	DUCKDB_API virtual unique_ptr<MultiFileList> Glob(const string &path, FileOpener *opener = nullptr);
+	DUCKDB_API unique_ptr<MultiFileList> GlobFiles(const string &path, ClientContext &context,
+	                                                   const FileGlobInput &input = FileGlobOptions::DISALLOW_EMPTY);
 
 	//! registers a sub-file system to handle certain file name prefixes, e.g. http:// etc.
 	DUCKDB_API virtual void RegisterSubSystem(unique_ptr<FileSystem> sub_fs);
