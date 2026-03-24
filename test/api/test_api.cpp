@@ -1,5 +1,8 @@
 #include "catch.hpp"
 #include "test_helpers.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/main/connection_manager.hpp"
@@ -814,4 +817,45 @@ TEST_CASE("Test buffer managed query result", "[api]") {
 
 	// Query result is no longer accessible
 	REQUIRE_THROWS(result->ToString());
+}
+
+TEST_CASE("UNPIVOT star view fails serialization with old protocol", "[serialization]") {
+	// Expressions in PIVOT/UNPIVOT IN (...) that cannot be folded back to constants
+	// must produce a serialization error when targeting old storage versions (< v1.5).
+	std::string db_path = "/tmp/pivot_serialization_test.db";
+	std::remove(db_path.c_str());
+	DuckDB db;
+	Connection con(db);
+	if (GENERATE(true, false)) {
+		REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "' (STORAGE_VERSION 'v1.4.4')"));
+	} else {
+		// Default storage version also affected
+		REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "'"));
+	}
+	REQUIRE_NO_FAIL(con.Query("USE pivot_serialization_test"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE t(id INT, jan INT, feb INT)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO t VALUES (1, 100, 200)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE s(id INT, key VARCHAR, value INT)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO s VALUES (1, 'a', 10)"));
+
+	SECTION("UNPIVOT IN (*) — StarExpression") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT * FROM t UNPIVOT (val FOR col IN (*))"));
+	}
+	SECTION("PIVOT IN (CASE ...) — CaseExpression") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (CASE WHEN true THEN 'a' END) USING (SUM(value))"));
+	}
+	SECTION("PIVOT IN (COALESCE(...)) — CaseExpression") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (COALESCE('a', 'z')) USING (SUM(value))"));
+	}
+	SECTION("PIVOT IN (IF(...)) — CaseExpression") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (IF(true, 'a', 'z')) USING (SUM(value))"));
+	}
+	SECTION("PIVOT IN (IFNULL(...)) — CaseExpression") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (IFNULL('a', 'z')) USING (SUM(value))"));
+	}
+	SECTION("PIVOT IN (list[idx]) — OperatorExpression (subscript)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (list_value('a')[1]) USING (SUM(value))"));
+	}
+
+	std::remove(db_path.c_str());
 }
