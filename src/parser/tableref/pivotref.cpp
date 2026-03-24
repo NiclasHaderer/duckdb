@@ -277,18 +277,30 @@ static bool TryFoldConstantForBackwardsCompatability(const ParsedExpression &exp
 	case ExpressionType::COMPARE_LESSTHAN:
 	case ExpressionType::COMPARE_GREATERTHAN:
 	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-	case ExpressionType::COMPARE_GREATERTHANOREQUALTO: {
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+	case ExpressionType::COMPARE_DISTINCT_FROM:
+	case ExpressionType::COMPARE_NOT_DISTINCT_FROM: {
 		auto &comp = expr.Cast<ComparisonExpression>();
 		Value left_val, right_val;
 		if (!TryFoldConstantForBackwardsCompatability(*comp.left, left_val) ||
 		    !TryFoldConstantForBackwardsCompatability(*comp.right, right_val)) {
 			return false;
 		}
+		auto type = expr.GetExpressionType();
+		// IS DISTINCT FROM / IS NOT DISTINCT FROM handle NULLs specially
+		if (type == ExpressionType::COMPARE_DISTINCT_FROM) {
+			value = Value::BOOLEAN(!Value::NotDistinctFrom(left_val, right_val));
+			return true;
+		}
+		if (type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+			value = Value::BOOLEAN(Value::NotDistinctFrom(left_val, right_val));
+			return true;
+		}
+		// Standard comparisons: NULL propagates
 		if (left_val.IsNull() || right_val.IsNull()) {
 			value = Value(LogicalType::BOOLEAN);
 			return true;
 		}
-		auto type = expr.GetExpressionType();
 		if (type == ExpressionType::COMPARE_EQUAL) {
 			value = Value::BOOLEAN(left_val == right_val);
 		} else if (type == ExpressionType::COMPARE_NOTEQUAL) {
@@ -334,7 +346,8 @@ static bool TryFoldConstantForBackwardsCompatability(const ParsedExpression &exp
 		value = Value::BOOLEAN(is_and);
 		return true;
 	}
-	case ExpressionType::COMPARE_BETWEEN: {
+	case ExpressionType::COMPARE_BETWEEN:
+	case ExpressionType::COMPARE_NOT_BETWEEN: {
 		auto &between = expr.Cast<BetweenExpression>();
 		Value input_val, lower_val, upper_val;
 		if (!TryFoldConstantForBackwardsCompatability(*between.input, input_val) ||
@@ -346,7 +359,8 @@ static bool TryFoldConstantForBackwardsCompatability(const ParsedExpression &exp
 			value = Value(LogicalType::BOOLEAN);
 			return true;
 		}
-		value = Value::BOOLEAN(input_val >= lower_val && input_val <= upper_val);
+		bool in_range = input_val >= lower_val && input_val <= upper_val;
+		value = Value::BOOLEAN(expr.GetExpressionType() == ExpressionType::COMPARE_BETWEEN ? in_range : !in_range);
 		return true;
 	}
 	case ExpressionType::COLLATE: {
@@ -477,7 +491,25 @@ static bool TryFoldConstantForBackwardsCompatability(const ParsedExpression &exp
 			}
 			return false;
 		}
+		// String subscript: single character extraction
+		if (source_val.type().id() == LogicalTypeId::VARCHAR) {
+			string error;
+			if (!index_val.DefaultTryCastAs(LogicalType::INTEGER, index_val, &error)) {
+				return false;
+			}
+			auto idx = IntegerValue::Get(index_val);
+			auto str = StringValue::Get(source_val);
+			if (idx < 1 || idx > static_cast<int32_t>(str.size())) {
+				value = Value();
+				return true;
+			}
+			value = Value(string(1, str[static_cast<size_t>(idx - 1)]));
+			return true;
+		}
 		// List/array access by integer index
+		if (source_val.type().id() != LogicalTypeId::LIST && source_val.type().id() != LogicalTypeId::ARRAY) {
+			return false;
+		}
 		string error;
 		if (!index_val.DefaultTryCastAs(LogicalType::INTEGER, index_val, &error)) {
 			return false;
@@ -547,13 +579,14 @@ static bool TryFoldConstantForBackwardsCompatability(const ParsedExpression &exp
 		if (start < 1) {
 			start = 1;
 		}
-		if (end > static_cast<int32_t>(str.size())) {
-			end = static_cast<int32_t>(str.size());
+		auto str_len = static_cast<int32_t>(str.size());
+		if (end > str_len) {
+			end = str_len;
 		}
 		if (start > end) {
 			value = Value("");
 		} else {
-			value = Value(str.substr(start - 1, end - start + 1));
+			value = Value(str.substr(static_cast<size_t>(start - 1), static_cast<size_t>(end - start + 1)));
 		}
 		return true;
 	}

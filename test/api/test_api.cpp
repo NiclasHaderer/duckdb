@@ -827,8 +827,9 @@ TEST_CASE("Pivot expression serialization with old storage versions", "[serializ
 	DuckDB db;
 	Connection con(db);
 	auto use_version = GENERATE(true, false);
+	std::string version;
 	if (use_version) {
-		std::string version = GENERATE(values<std::string>({"v1.4.4", "v1.5.0"}));
+		version = GENERATE(values<std::string>({"v1.4.4", "v1.5.0"}));
 		REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "' (STORAGE_VERSION '" + version + "')"));
 	} else {
 		REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "'"));
@@ -977,6 +978,80 @@ TEST_CASE("Pivot expression serialization with old storage versions", "[serializ
 		REQUIRE(result->ColumnCount() == 2);
 		REQUIRE(CHECK_COLUMN(result, 0, {1}));
 		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+
+	SECTION("PIVOT IN (IS NULL)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (NULL IS NULL) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (IS NOT NULL)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (1 IS NOT NULL) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (NOT IN)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (1 NOT IN (2,3)) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (NOT BETWEEN)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (1 NOT BETWEEN 5 AND 10) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (IS DISTINCT FROM)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (1 IS DISTINCT FROM 2) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (TRY_CAST of non-constant)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (TRY_CAST(CASE WHEN true THEN 'a' END AS VARCHAR)) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("UNPIVOT IN (COLUMNS(*))") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT * FROM t UNPIVOT (val FOR col IN (COLUMNS(*)))"));
+		auto result = con.Query("SELECT * FROM v ORDER BY col");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {"feb", "id", "jan"}));
+		REQUIRE(CHECK_COLUMN(result, 1, {200, 1, 100}));
+	}
+	SECTION("UNPIVOT IN (COLUMNS(regex))") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT * FROM t UNPIVOT (val FOR col IN (COLUMNS('j.*')))"));
+		auto result = con.Query("SELECT * FROM v ORDER BY col");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 4);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {200}));
+		REQUIRE(CHECK_COLUMN(result, 2, {"jan"}));
+		REQUIRE(CHECK_COLUMN(result, 3, {100}));
+	}
+	SECTION("PIVOT IN (string subscript)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN ('hello'[1]) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
 	}
 
 	std::remove(db_path.c_str());
