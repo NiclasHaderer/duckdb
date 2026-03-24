@@ -819,17 +819,18 @@ TEST_CASE("Test buffer managed query result", "[api]") {
 	REQUIRE_THROWS(result->ToString());
 }
 
-TEST_CASE("UNPIVOT star view fails serialization with old protocol", "[serialization]") {
+TEST_CASE("Pivot expression serialization with old storage versions", "[serialization]") {
 	// Expressions in PIVOT/UNPIVOT IN (...) that cannot be folded back to constants
-	// must produce a serialization error when targeting old storage versions (< v1.5).
+	// must still serialize correctly when targeting old storage versions.
 	std::string db_path = "/tmp/pivot_serialization_test.db";
 	std::remove(db_path.c_str());
 	DuckDB db;
 	Connection con(db);
-	if (GENERATE(true, false)) {
-		REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "' (STORAGE_VERSION 'v1.4.4')"));
+	auto use_version = GENERATE(true, false);
+	if (use_version) {
+		std::string version = GENERATE(values<std::string>({"v1.4.4", "v1.5.0"}));
+		REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "' (STORAGE_VERSION '" + version + "')"));
 	} else {
-		// Default storage version also affected
 		REQUIRE_NO_FAIL(con.Query("ATTACH '" + db_path + "'"));
 	}
 	REQUIRE_NO_FAIL(con.Query("USE pivot_serialization_test"));
@@ -837,24 +838,145 @@ TEST_CASE("UNPIVOT star view fails serialization with old protocol", "[serializa
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO t VALUES (1, 100, 200)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE s(id INT, key VARCHAR, value INT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO s VALUES (1, 'a', 10)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE b(id INT, flag BOOLEAN, value INT)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO b VALUES (1, true, 10)"));
 
-	SECTION("UNPIVOT IN (*) — StarExpression") {
+	SECTION("UNPIVOT IN (*)") {
 		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT * FROM t UNPIVOT (val FOR col IN (*))"));
+		auto result = con.Query("SELECT * FROM v ORDER BY col");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {"feb", "id", "jan"}));
+		REQUIRE(CHECK_COLUMN(result, 1, {200, 1, 100}));
 	}
-	SECTION("PIVOT IN (CASE ...) — CaseExpression") {
+	SECTION("UNPIVOT IN (* EXCLUDE)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT * FROM t UNPIVOT (val FOR col IN (* EXCLUDE (id)))"));
+		auto result = con.Query("SELECT * FROM v ORDER BY col");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 3);
+		REQUIRE(CHECK_COLUMN(result, 0, {1, 1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {"feb", "jan"}));
+		REQUIRE(CHECK_COLUMN(result, 2, {200, 100}));
+	}
+	SECTION("UNPIVOT IN (* REPLACE)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS SELECT * FROM t UNPIVOT (val FOR col IN (* REPLACE (jan*2 AS jan)))"));
+		auto result = con.Query("SELECT * FROM v ORDER BY col");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {"feb", "id", "jan"}));
+		REQUIRE(CHECK_COLUMN(result, 1, {200, 1, 200}));
+	}
+	SECTION("PIVOT IN (CASE ...)") {
 		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (CASE WHEN true THEN 'a' END) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
 	}
-	SECTION("PIVOT IN (COALESCE(...)) — CaseExpression") {
+	SECTION("PIVOT IN (COALESCE(...))") {
 		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (COALESCE('a', 'z')) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
 	}
-	SECTION("PIVOT IN (IF(...)) — CaseExpression") {
+	SECTION("PIVOT IN (IF(...))") {
 		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (IF(true, 'a', 'z')) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
 	}
-	SECTION("PIVOT IN (IFNULL(...)) — CaseExpression") {
+	SECTION("PIVOT IN (IFNULL(...))") {
 		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (IFNULL('a', 'z')) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
 	}
-	SECTION("PIVOT IN (list[idx]) — OperatorExpression (subscript)") {
-		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (list_value('a')[1]) USING (SUM(value))"));
+	SECTION("PIVOT IN (equality comparison)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (1 = 1) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (AND conjunction)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (true AND true) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (NOT operator)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (NOT false) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (BETWEEN)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (1 BETWEEN 0 AND 2) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (IN list)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT b ON flag IN (1 IN (1,2,3)) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (array subscript)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (['a','b'][1]) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (struct access)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN ({'key': 'a'}.key) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (string slice)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN ('hello'[1:1]) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {Value()}));
+	}
+	SECTION("PIVOT IN (COLLATE)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN ('a' COLLATE \"C\") USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
+	}
+	SECTION("PIVOT IN (CAST of non-constant)") {
+		REQUIRE_NO_FAIL(con.Query("CREATE VIEW v AS PIVOT s ON key IN (CAST(lower('A') AS VARCHAR)) USING (SUM(value))"));
+		auto result = con.Query("SELECT * FROM v");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ColumnCount() == 2);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {10}));
 	}
 
 	std::remove(db_path.c_str());
