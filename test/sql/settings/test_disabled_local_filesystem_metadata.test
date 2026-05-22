@@ -19,6 +19,12 @@ SELECT * FROM duckdb_secrets();
 ----
 File system LocalFileSystem has been disabled by configuration
 
+# Repeated access should not fail because the in-memory secret storage was partially registered
+statement error
+SELECT * FROM duckdb_secrets();
+----
+File system LocalFileSystem has been disabled by configuration
+
 statement error
 SELECT * FROM duckdb_extensions();
 ----

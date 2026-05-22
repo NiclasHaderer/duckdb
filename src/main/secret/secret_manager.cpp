@@ -560,13 +560,25 @@ void SecretManager::InitializeSecrets(CatalogTransaction transaction) {
 			return;
 		}
 
-		// load the tmp storage
-		LoadSecretStorageInternal(make_uniq<TemporarySecretStorage>(TEMPORARY_STORAGE_NAME, *transaction.db));
+		auto temporary_storage = make_uniq<TemporarySecretStorage>(TEMPORARY_STORAGE_NAME, *transaction.db);
 
+		unique_ptr<SecretStorage> local_file_storage;
 		if (config.allow_persistent_secrets) {
-			// load the persistent storage if enabled
-			LoadSecretStorageInternal(
-			    make_uniq<LocalFileSecretStorage>(*this, *transaction.db, LOCAL_FILE_STORAGE_NAME, config.secret_path));
+			local_file_storage =
+			    make_uniq<LocalFileSecretStorage>(*this, *transaction.db, LOCAL_FILE_STORAGE_NAME, config.secret_path);
+		}
+
+		// Load the default storages only after constructing all enabled backends. Otherwise a failure while
+		// constructing the persistent storage leaves the manager partially initialized.
+		LoadSecretStorageInternal(std::move(temporary_storage));
+
+		try {
+			if (local_file_storage) {
+				LoadSecretStorageInternal(std::move(local_file_storage));
+			}
+		} catch (...) {
+			secret_storages.erase(TEMPORARY_STORAGE_NAME);
+			throw;
 		}
 
 		initialized = true;
