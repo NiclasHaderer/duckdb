@@ -963,7 +963,7 @@ public:
 
 	//! Assigns a task to a local source state
 	SourceResultType AssignTask(RadixHTGlobalSinkState &sink, RadixHTLocalSourceState &lstate,
-	                            InterruptState &interrupt_state);
+	                            OperatorSourceInput &input);
 
 public:
 	//! The client context
@@ -1014,9 +1014,6 @@ public:
 	unique_ptr<GroupedAggregateHashTable> ht;
 	//! Current status of a Scan
 	RadixHTScanStatus scan_status;
-	//! Whether this thread has produced any rows yet.
-	//! A thread that has produced rows must not block waiting for other threads: the sink may be waiting for it.
-	bool produced;
 
 private:
 	//! Allocator and layout for finalizing state
@@ -1060,7 +1057,7 @@ RadixHTGlobalSourceState::RadixHTGlobalSourceState(ClientContext &context_p, con
 }
 
 SourceResultType RadixHTGlobalSourceState::AssignTask(RadixHTGlobalSinkState &sink, RadixHTLocalSourceState &lstate,
-                                                      InterruptState &interrupt_state) {
+                                                      OperatorSourceInput &input) {
 	// First, try to get a partition index
 	const annotated_lock_guard<annotated_mutex> guard {lock};
 	if (finished || task_idx >= sink.partitions.size()) {
@@ -1074,10 +1071,10 @@ SourceResultType RadixHTGlobalSourceState::AssignTask(RadixHTGlobalSinkState &si
 		// Not enough memory for another partition. Release this thread's hash table so it holds no partition memory
 		// while it waits; the next partition to finish its scan frees memory and wakes it to check again.
 		lstate.ht.reset();
-		if (lstate.produced) {
+		if (input.produced) {
 			return SourceResultType::FINISHED;
 		}
-		return BlockSource(interrupt_state);
+		return BlockSource(input.interrupt_state);
 	}
 
 	// We got a partition index
@@ -1091,7 +1088,7 @@ SourceResultType RadixHTGlobalSourceState::AssignTask(RadixHTGlobalSinkState &si
 	case AggregatePartitionState::FINALIZE_IN_PROGRESS:
 		lstate.task = RadixHTSourceTaskType::SCAN;
 		lstate.scan_status = RadixHTScanStatus::INIT;
-		return partition.BlockSource(interrupt_state);
+		return partition.BlockSource(input.interrupt_state);
 	case AggregatePartitionState::READY_TO_SCAN:
 		lstate.task = RadixHTSourceTaskType::SCAN;
 		lstate.scan_status = RadixHTScanStatus::INIT;
@@ -1118,7 +1115,6 @@ void RadixHTLocalSourceState::ResetForReuse() {
 	task_idx = DConstants::INVALID_INDEX;
 	ht.reset();
 	scan_status = RadixHTScanStatus::DONE;
-	produced = false;
 	aggregate_allocator.Reset();
 	row_state.addresses.reset();
 	scan_state.Reset();
@@ -1284,7 +1280,6 @@ void RadixHTLocalSourceState::Scan(RadixHTGlobalSinkState &sink, RadixHTGlobalSo
 		                                                                                   count_t(scan_chunk.size()));
 	}
 	D_ASSERT(chunk.size() != 0);
-	produced = true;
 }
 
 bool RadixHTLocalSourceState::TaskFinished() {
@@ -1354,7 +1349,7 @@ SourceResultType RadixPartitionedHashTable::GetData(ExecutionContext &context, D
 
 	while (!gstate.finished && chunk.size() == 0) {
 		if (lstate.TaskFinished()) {
-			const auto res = gstate.AssignTask(sink, lstate, input.interrupt_state);
+			const auto res = gstate.AssignTask(sink, lstate, input);
 			if (res != SourceResultType::HAVE_MORE_OUTPUT) {
 				D_ASSERT(res == SourceResultType::FINISHED || res == SourceResultType::BLOCKED);
 				return res;

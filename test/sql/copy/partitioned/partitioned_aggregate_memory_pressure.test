@@ -29,3 +29,18 @@ SELECT count(*), sum(c)
 FROM read_parquet('{TEST_DIR}/partitioned_aggregate_memory_pressure/**/*.parquet')
 ----
 5000000	5000000
+
+# A thread that produced rows for one grouping set must not wait for memory in the next one either
+# (without aggregates, the grouping sets stay in a single hash aggregate)
+statement ok
+COPY (
+	SELECT i, j, coalesce(i, j) % 2 AS part
+	FROM (SELECT i, i + 1 AS j FROM range(5000000) t(i))
+	GROUP BY GROUPING SETS ((i), (j))
+) TO '{TEST_DIR}/partitioned_aggregate_memory_pressure_grouping_sets' (FORMAT PARQUET, PARTITION_BY (part));
+
+query II
+SELECT count(i), count(j)
+FROM read_parquet('{TEST_DIR}/partitioned_aggregate_memory_pressure_grouping_sets/**/*.parquet')
+----
+5000000	5000000

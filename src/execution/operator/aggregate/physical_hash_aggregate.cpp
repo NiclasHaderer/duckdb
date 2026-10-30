@@ -1001,6 +1001,7 @@ SourceResultType PhysicalHashAggregate::GetDataInternal(ExecutionContext &contex
 
 		OperatorSourceInput source_input {*gstate.radix_states[radix_idx], *lstate.radix_states[radix_idx],
 		                                  input.interrupt_state};
+		source_input.produced = input.produced;
 		auto res = radix_table.GetData(context, chunk, *grouping_gstate.table_state, source_input);
 		if (res == SourceResultType::BLOCKED) {
 			return res;
