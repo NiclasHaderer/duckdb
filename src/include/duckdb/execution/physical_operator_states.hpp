@@ -218,6 +218,10 @@ struct OperatorSourceInput {
 	LocalSourceState &local_state;
 	InterruptState &interrupt_state;
 	SourceBatchIndexState batch_index_state = SourceBatchIndexState::UNCHANGED;
+	//! Whether this task has already handed rows from this source to the sink.
+	//! Such a task must not block waiting for other tasks: the sink may be waiting for it (e.g., a partitioned COPY
+	//! cannot flush until every producer has combined).
+	bool produced = false;
 };
 
 struct OperatorSinkCombineInput {
