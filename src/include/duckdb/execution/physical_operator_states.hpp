@@ -163,6 +163,14 @@ public:
 		ResetBlocking();
 	}
 
+	// Called when the pipeline finishes early. A state whose tasks can block on nested source states must forward
+	// this to them, or the tasks blocked there are never woken and the pipeline never completes.
+	virtual void StopBlocking() {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		PreventBlocking();
+		UnblockTasks();
+	}
+
 	template <class TARGET>
 	TARGET &Cast() {
 		DynamicCastCheck<TARGET>(this);
