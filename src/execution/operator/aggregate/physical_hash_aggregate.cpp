@@ -906,6 +906,13 @@ private:
 	}
 
 public:
+	void StopBlocking() override {
+		GlobalSourceState::StopBlocking();
+		for (auto &radix_state : radix_states) {
+			radix_state->StopBlocking();
+		}
+	}
+
 	idx_t MaxThreads() override {
 		// If there are no tables, we only need one thread.
 		if (op.groupings.empty()) {
@@ -994,6 +1001,7 @@ SourceResultType PhysicalHashAggregate::GetDataInternal(ExecutionContext &contex
 
 		OperatorSourceInput source_input {*gstate.radix_states[radix_idx], *lstate.radix_states[radix_idx],
 		                                  input.interrupt_state};
+		source_input.produced = input.produced;
 		auto res = radix_table.GetData(context, chunk, *grouping_gstate.table_state, source_input);
 		if (res == SourceResultType::BLOCKED) {
 			return res;
