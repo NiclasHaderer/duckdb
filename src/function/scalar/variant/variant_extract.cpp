@@ -104,13 +104,13 @@ static ShreddedExtractResult TryShreddedExtractRecursive(const Vector &input_p,
 	if (path_index >= components.size() && input_p.GetType().id() == LogicalTypeId::STRUCT) {
 		// a partially shredded leaf is STRUCT(typed_value, untyped_value_index): rows whose value did not fit the
 		// shredded type live in the unshredded part, so the typed values are only the result when there are none
-		auto &leaf_type = input_p.GetType();
 		auto &leaf_entries = StructVector::GetEntries(input_p);
-		if (leaf_entries.size() != 2 || StructType::GetChildName(leaf_type, 0) != "typed_value" ||
-		    StructType::GetChildName(leaf_type, 1) != "untyped_value_index" || !IsAllNull(leaf_entries[1], count)) {
+		D_ASSERT(StructType::GetChildName(input_p.GetType(), VariantStats::TYPED_VALUE_INDEX) == "typed_value");
+		if (leaf_entries.size() > VariantStats::UNTYPED_VALUE_INDEX &&
+		    !IsAllNull(leaf_entries[VariantStats::UNTYPED_VALUE_INDEX], count)) {
 			return ShreddedExtractResult::NOT_SUPPORTED;
 		}
-		input_ref = leaf_entries[0];
+		input_ref = leaf_entries[VariantStats::TYPED_VALUE_INDEX];
 	}
 	auto &input = input_ref.get();
 	if (path_index >= components.size()) {
