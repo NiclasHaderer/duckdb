@@ -84,9 +84,35 @@ static unique_ptr<FunctionData> VariantExtractBind(BindScalarFunctionInput &inpu
 
 enum class ShreddedExtractResult : uint8_t { SUCCESS, NOT_SUPPORTED, KEY_NOT_FOUND };
 
-static ShreddedExtractResult TryShreddedExtractRecursive(const Vector &input,
+static bool IsAllNull(const Vector &input, idx_t count) {
+	auto validity = input.Validity();
+	if (validity.CannotHaveNull()) {
+		return count == 0;
+	}
+	for (idx_t i = 0; i < count; i++) {
+		if (validity.IsValid(i)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static ShreddedExtractResult TryShreddedExtractRecursive(const Vector &input_p,
                                                          const vector<VariantPathComponent> &components, Vector &result,
                                                          idx_t count, idx_t path_index = 0) {
+	reference<const Vector> input_ref(input_p);
+	if (path_index >= components.size() && input_p.GetType().id() == LogicalTypeId::STRUCT) {
+		// a partially shredded leaf is STRUCT(typed_value, untyped_value_index): rows whose value did not fit the
+		// shredded type live in the unshredded part, so the typed values are only the result when there are none
+		auto &leaf_type = input_p.GetType();
+		auto &leaf_entries = StructVector::GetEntries(input_p);
+		if (leaf_entries.size() != 2 || StructType::GetChildName(leaf_type, 0) != "typed_value" ||
+		    StructType::GetChildName(leaf_type, 1) != "untyped_value_index" || !IsAllNull(leaf_entries[1], count)) {
+			return ShreddedExtractResult::NOT_SUPPORTED;
+		}
+		input_ref = leaf_entries[0];
+	}
+	auto &input = input_ref.get();
 	if (path_index >= components.size()) {
 		// reached the end of the path - shred
 		if (input.GetType().IsNested()) {
@@ -141,7 +167,6 @@ static ShreddedExtractResult TryShreddedExtractRecursive(const Vector &input,
 			return TryShreddedExtractRecursive(child_entries[child_idx], components, result, count, path_index + 1);
 		}
 	}
-	// the vector is fully shredded, so a key outside the shredded type is NULL in every row
 	return ShreddedExtractResult::KEY_NOT_FOUND;
 }
 
@@ -151,15 +176,17 @@ static bool TryFromShreddedExtract(const Vector &variant_vec, const vector<Varia
 		// input vector is not shredded
 		return false;
 	}
-	if (!ShreddedVector::IsFullyShredded(variant_vec)) {
-		// input vector is not fully shredded
-		return false;
-	}
+	// a shredded key never also appears in the unshredded part of its object, so a partially shredded vector only
+	// needs the unshredded part when the key is not shredded or a leaf has an untyped value
 	auto &shredded_vec = ShreddedVector::GetShreddedVector(variant_vec);
 	switch (TryShreddedExtractRecursive(shredded_vec, components, result, count)) {
 	case ShreddedExtractResult::SUCCESS:
 		return true;
 	case ShreddedExtractResult::KEY_NOT_FOUND:
+		if (!ShreddedVector::IsFullyShredded(variant_vec)) {
+			// the key can still be in the unshredded part
+			return false;
+		}
 		ConstantVector::SetNull(result, count_t(count));
 		return true;
 	default:

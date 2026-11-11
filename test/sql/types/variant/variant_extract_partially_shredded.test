@@ -1,0 +1,141 @@
+# name: test/sql/types/variant/variant_extract_partially_shredded.test
+# description: Extracting from a partially shredded VARIANT reads shredded keys directly and returns the same values as the unshredded VARIANT
+# group: [variant]
+
+require parquet
+
+require json
+
+load __TEST_DIR__/variant_extract_partially_shredded.db
+
+# 'a' is shredded and always fits, 'b' is shredded as VARCHAR but holds an integer every 100th row,
+# 'extra' is not shredded and lives in the unshredded part of every row
+statement ok
+COPY (
+	SELECT i, json_object(
+		'a', 'a' || i,
+		'b', CASE WHEN i % 100 = 0 THEN to_json(i) ELSE to_json('b' || i) END,
+		'extra', 'e' || i)::VARIANT AS v
+	FROM range(5000) t(i)
+) TO '__TEST_DIR__/partially_shredded.parquet' (FORMAT parquet, SHREDDING {v: 'STRUCT(a VARCHAR, b VARCHAR)'});
+
+query II
+SELECT bool_or(stats_null_count < num_values) FILTER (WHERE path_in_schema = 'v, value'),
+       bool_or(stats_null_count < num_values) FILTER (WHERE path_in_schema = 'v, typed_value, b, value')
+FROM parquet_metadata('__TEST_DIR__/partially_shredded.parquet');
+----
+true	true
+
+# 'a' is read from its shredded column, 'b' and 'extra' need the unshredded part
+query III
+SELECT bool_and(vector_type(v.a) = 'SHREDDED_VECTOR'), bool_or(vector_type(v.b) = 'SHREDDED_VECTOR'), bool_or(vector_type(v.extra) = 'SHREDDED_VECTOR')
+FROM '__TEST_DIR__/partially_shredded.parquet';
+----
+true	false	false
+
+query IIII
+SELECT count(v.a), sum(length(v.a::VARCHAR)), count(*) FILTER (WHERE v.a::VARCHAR = 'a42'), count(*) FILTER (WHERE v.a::VARCHAR = 'a4999')
+FROM '__TEST_DIR__/partially_shredded.parquet';
+----
+5000	23890	1	1
+
+query III
+SELECT count(v.extra), count(*) FILTER (WHERE v.extra::VARCHAR = 'e42'), count(*) FILTER (WHERE v['extra']::VARCHAR = 'e4999')
+FROM '__TEST_DIR__/partially_shredded.parquet';
+----
+5000	1	1
+
+query IIII
+SELECT count(v.b), count(*) FILTER (WHERE v.b::VARCHAR = '100'), count(*) FILTER (WHERE v.b::VARCHAR = 'b42'), count(*) FILTER (WHERE variant_typeof(v.b) = 'VARCHAR')
+FROM '__TEST_DIR__/partially_shredded.parquet';
+----
+5000	1	1	4950
+
+query II
+SELECT count(v.zzz), count(v.a.deep)
+FROM '__TEST_DIR__/partially_shredded.parquet';
+----
+0	0
+
+statement ok
+SET disabled_optimizers = 'unused_columns';
+
+query IIII
+SELECT count(v.a), sum(length(v.a::VARCHAR)), count(*) FILTER (WHERE v.extra::VARCHAR = 'e42'), count(*) FILTER (WHERE v.b::VARCHAR = '100')
+FROM '__TEST_DIR__/partially_shredded.parquet';
+----
+5000	23890	1	1
+
+statement ok
+RESET disabled_optimizers;
+
+# unshredded reference tables: rows that are not objects, SQL NULL, JSON null, missing keys and NULL key values
+statement ok
+SET variant_minimum_shredding_size = -1;
+
+statement ok
+CREATE TABLE top_src AS SELECT i, CASE
+	WHEN i % 7 = 0 THEN (i)::VARIANT
+	WHEN i % 11 = 0 THEN NULL
+	WHEN i % 13 = 0 THEN 'null'::JSON::VARIANT
+	WHEN i % 17 = 0 THEN [1, 2]::VARIANT
+	WHEN i % 19 = 0 THEN {'k': NULL::VARCHAR, 'e': 1}::VARIANT
+	WHEN i % 23 = 0 THEN 'str'::VARIANT
+	WHEN i % 29 = 0 THEN {'e': i}::VARIANT
+	ELSE {'k': 'k' || i, 'e': i}::VARIANT END AS v
+FROM range(5000) t(i);
+
+# the intermediate object 'o' is partially shredded: extra keys, not an object, missing or JSON null in some rows
+statement ok
+CREATE TABLE nested_src AS SELECT i, CASE
+	WHEN i % 7 = 0 THEN (i)::VARIANT
+	WHEN i % 11 = 0 THEN NULL
+	WHEN i % 13 = 0 THEN {'o': i}::VARIANT
+	WHEN i % 17 = 0 THEN {'o': {'x': 'x' || i, 'z': 2}, 'q': 3}::VARIANT
+	WHEN i % 19 = 0 THEN {'o': [1, 2]}::VARIANT
+	WHEN i % 23 = 0 THEN 'null'::JSON::VARIANT
+	WHEN i % 29 = 0 THEN {'p': 1}::VARIANT
+	WHEN i % 31 = 0 THEN {'o': 'null'::JSON::VARIANT}::VARIANT
+	ELSE {'o': {'x': 'x' || i}}::VARIANT END AS v
+FROM range(5000) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+SET variant_minimum_shredding_size = 0;
+
+statement ok
+CREATE TABLE top_shredded AS SELECT * FROM top_src;
+
+statement ok
+CREATE TABLE nested_shredded AS SELECT * FROM nested_src;
+
+statement ok
+CHECKPOINT;
+
+query III
+SELECT count(s.v.k), count(s.v.e), count(*) FILTER (WHERE
+	s.v.k::VARCHAR IS DISTINCT FROM u.v.k::VARCHAR OR (s.v.k IS NULL) <> (u.v.k IS NULL) OR
+	s.v.e::VARCHAR IS DISTINCT FROM u.v.e::VARCHAR OR (s.v.zz IS NULL) <> (u.v.zz IS NULL))
+FROM top_shredded s JOIN top_src u USING (i);
+----
+2967	3246	0
+
+query III
+SELECT count(s.v.o.x), bool_or(vector_type(s.v.o.x) = 'SHREDDED_VECTOR'), count(*) FILTER (WHERE
+	s.v.o.x::VARCHAR IS DISTINCT FROM u.v.o.x::VARCHAR OR (s.v.o.x IS NULL) <> (u.v.o.x IS NULL))
+FROM nested_shredded s JOIN nested_src u USING (i);
+----
+3089	true	0
+
+statement ok
+COPY nested_src TO '__TEST_DIR__/nested_partially_shredded.parquet' (FORMAT parquet, SHREDDING {v: 'STRUCT(o STRUCT(x VARCHAR))'});
+
+query II
+SELECT count(s.v.o.x), count(*) FILTER (WHERE
+	s.v.o.x::VARCHAR IS DISTINCT FROM u.v.o.x::VARCHAR OR (s.v.o.x IS NULL) <> (u.v.o.x IS NULL) OR
+	(s.v.o.z IS NULL) <> (u.v.o.z IS NULL) OR (s.v.q IS NULL) <> (u.v.q IS NULL))
+FROM '__TEST_DIR__/nested_partially_shredded.parquet' s JOIN nested_src u USING (i);
+----
+3089	0
