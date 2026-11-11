@@ -6,7 +6,7 @@ require parquet
 
 require json
 
-load __TEST_DIR__/variant_extract_partially_shredded.db
+load {TEST_DIR}/variant_extract_partially_shredded.db
 
 # 'a' is shredded and always fits, 'b' is shredded as VARCHAR but holds an integer every 100th row,
 # 'extra' is not shredded and lives in the unshredded part of every row
@@ -26,12 +26,12 @@ FROM parquet_metadata('__TEST_DIR__/partially_shredded.parquet');
 ----
 true	true
 
-# 'a' is read from its shredded column, 'b' and 'extra' need the unshredded part
+# 'a' and 'b' are read from their shredded columns, 'extra' is not shredded and needs the unshredded part
 query III
-SELECT bool_and(vector_type(v.a) = 'SHREDDED_VECTOR'), bool_or(vector_type(v.b) = 'SHREDDED_VECTOR'), bool_or(vector_type(v.extra) = 'SHREDDED_VECTOR')
+SELECT bool_and(vector_type(v.a) = 'SHREDDED_VECTOR'), bool_and(vector_type(v.b) = 'SHREDDED_VECTOR'), bool_or(vector_type(v.extra) = 'SHREDDED_VECTOR')
 FROM '__TEST_DIR__/partially_shredded.parquet';
 ----
-true	false	false
+true	true	false
 
 query IIII
 SELECT count(v.a), sum(length(v.a::VARCHAR)), count(*) FILTER (WHERE v.a::VARCHAR = 'a42'), count(*) FILTER (WHERE v.a::VARCHAR = 'a4999')
@@ -56,6 +56,19 @@ SELECT count(v.zzz), count(v.a.deep)
 FROM '__TEST_DIR__/partially_shredded.parquet';
 ----
 0	0
+
+# 'opt' is missing in every other row, which the writer encodes as untyped_value_index 0
+statement ok
+COPY (
+	SELECT i, CASE WHEN i % 2 = 0 THEN {'opt': 'o' || i, 'extra': i} ELSE {'extra': i} END::VARIANT AS v
+	FROM range(5000) t(i)
+) TO '__TEST_DIR__/optional_key.parquet' (FORMAT parquet, SHREDDING {v: 'STRUCT(opt VARCHAR)'});
+
+query IIII
+SELECT bool_and(vector_type(v.opt) = 'SHREDDED_VECTOR'), count(v.opt), count(*) FILTER (WHERE v.opt::VARCHAR = 'o42'), count(*) FILTER (WHERE i % 2 = 1 AND v.opt IS NOT NULL)
+FROM '__TEST_DIR__/optional_key.parquet';
+----
+true	2500	1	0
 
 statement ok
 SET disabled_optimizers = 'unused_columns';

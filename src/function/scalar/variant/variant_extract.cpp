@@ -5,6 +5,7 @@
 #include "duckdb/common/vector/shredded_vector.hpp"
 #include "duckdb/common/vector/variant_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/common/types/variant_iterator.hpp"
 #include "duckdb/function/scalar/variant_utils.hpp"
 #include "duckdb/function/scalar/variant_functions.hpp"
 #include "duckdb/function/scalar/regexp.hpp"
@@ -84,53 +85,69 @@ static unique_ptr<FunctionData> VariantExtractBind(BindScalarFunctionInput &inpu
 
 enum class ShreddedExtractResult : uint8_t { SUCCESS, NOT_SUPPORTED, KEY_NOT_FOUND };
 
-static bool IsAllNull(const Vector &input, idx_t count) {
-	auto validity = input.Validity();
-	if (validity.CannotHaveNull()) {
-		return count == 0;
+//! References the leaf wrapper's children into 'result', NULL-ing rows whose leftover value is a VARIANT_NULL: extract
+//! returns those as SQL NULL, but resolving the wrapper would yield a valid VARIANT_NULL root
+static void ReferenceLeafWrapper(const Vector &input, const Vector &unshredded, Vector &result, idx_t count) {
+	auto &input_entries = StructVector::GetEntries(input);
+	auto &result_entries = StructVector::GetEntries(result);
+	D_ASSERT(input_entries.size() == 2);
+	for (idx_t i = 0; i < input_entries.size(); i++) {
+		result_entries[i].Reference(input_entries[i]);
 	}
-	for (idx_t i = 0; i < count; i++) {
-		if (validity.IsValid(i)) {
-			return false;
+	auto input_validity = input.Validity();
+	auto typed_validity = input_entries[VariantStats::TYPED_VALUE_INDEX].Validity();
+	auto untyped_indexes = input_entries[VariantStats::UNTYPED_VALUE_INDEX].Values<uint32_t>();
+	unique_ptr<UnshreddedVariantIterator> leftovers;
+	auto &validity = FlatVector::ValidityMutable(result);
+	for (idx_t row = 0; row < count; row++) {
+		if (!input_validity.IsValid(row)) {
+			validity.SetInvalid(row);
+			continue;
+		}
+		auto untyped_index = untyped_indexes[row];
+		if (typed_validity.IsValid(row) || !untyped_index.IsValid() || untyped_index.GetValue() == 0) {
+			continue;
+		}
+		if (!leftovers) {
+			leftovers = make_uniq<UnshreddedVariantIterator>(unshredded);
+		}
+		if (leftovers->GetTypeId(row, untyped_index.GetValue() - 1) == VariantLogicalType::VARIANT_NULL) {
+			validity.SetInvalid(row);
 		}
 	}
-	return true;
 }
 
-static ShreddedExtractResult TryShreddedExtractRecursive(const Vector &input_p,
+static ShreddedExtractResult TryShreddedExtractRecursive(const Vector &input, const Vector &unshredded,
                                                          const vector<VariantPathComponent> &components, Vector &result,
                                                          idx_t count, idx_t path_index = 0) {
-	reference<const Vector> input_ref(input_p);
-	if (path_index >= components.size() && input_p.GetType().id() == LogicalTypeId::STRUCT) {
-		// a partially shredded leaf is STRUCT(typed_value, untyped_value_index): rows whose value did not fit the
-		// shredded type live in the unshredded part, so the typed values are only the result when there are none
-		auto &leaf_entries = StructVector::GetEntries(input_p);
-		D_ASSERT(StructType::GetChildName(input_p.GetType(), VariantStats::TYPED_VALUE_INDEX) == "typed_value");
-		if (leaf_entries.size() > VariantStats::UNTYPED_VALUE_INDEX &&
-		    !IsAllNull(leaf_entries[VariantStats::UNTYPED_VALUE_INDEX], count)) {
-			return ShreddedExtractResult::NOT_SUPPORTED;
-		}
-		input_ref = leaf_entries[VariantStats::TYPED_VALUE_INDEX];
-	}
-	auto &input = input_ref.get();
 	if (path_index >= components.size()) {
 		// reached the end of the path - shred
-		if (input.GetType().IsNested()) {
+		auto &leaf_type = input.GetType();
+		const bool is_wrapper = leaf_type.id() == LogicalTypeId::STRUCT;
+		D_ASSERT(!is_wrapper || StructType::GetChildName(leaf_type, VariantStats::TYPED_VALUE_INDEX) == "typed_value");
+		auto &typed_type =
+		    is_wrapper ? StructType::GetChildType(leaf_type, VariantStats::TYPED_VALUE_INDEX) : leaf_type;
+		if (typed_type.IsNested()) {
 			// we only support this for non-nested types for now
 			return ShreddedExtractResult::NOT_SUPPORTED;
 		}
-		// create the shredded vector with an empty unshredded part
-		auto shredded_type = VariantUtils::ShreddedType(input.GetType());
-		Vector shredded_vector(shredded_type, count);
+		Vector shredded_vector(LogicalType::STRUCT({{"unshredded", unshredded.GetType()}, {"shredded", leaf_type}}),
+		                       count);
 		auto &top_shredded = StructVector::GetEntries(shredded_vector);
-		// NULL out everything in the unshredded part
 		auto &unshredded_child = top_shredded[0];
-		for (auto &unshredded_entry : StructVector::GetEntries(unshredded_child)) {
-			ConstantVector::SetNull(unshredded_entry, count_t(count));
-		}
-		ConstantVector::SetNull(unshredded_child, count_t(count));
 		auto &shredded_child = top_shredded[1];
-		shredded_child.Reference(input);
+		if (is_wrapper) {
+			// the untyped_value_index of a STRUCT(typed_value, untyped_value_index) leaf points into the unshredded
+			// part of the same row, so referencing the input's unshredded part keeps those rows resolvable
+			unshredded_child.Reference(unshredded);
+			ReferenceLeafWrapper(input, unshredded, shredded_child, count);
+		} else {
+			for (auto &unshredded_entry : StructVector::GetEntries(unshredded_child)) {
+				ConstantVector::SetNull(unshredded_entry, count_t(count));
+			}
+			ConstantVector::SetNull(unshredded_child, count_t(count));
+			shredded_child.Reference(input);
+		}
 
 		FlatVector::SetSize(shredded_vector, count_t(count));
 		result.Shred(shredded_vector, count);
@@ -164,7 +181,8 @@ static ShreddedExtractResult TryShreddedExtractRecursive(const Vector &input_p,
 		auto &entry = child_types[child_idx];
 		if (entry.first.GetIdentifierName() == component.key) {
 			// key found - move onto next component
-			return TryShreddedExtractRecursive(child_entries[child_idx], components, result, count, path_index + 1);
+			return TryShreddedExtractRecursive(child_entries[child_idx], unshredded, components, result, count,
+			                                   path_index + 1);
 		}
 	}
 	return ShreddedExtractResult::KEY_NOT_FOUND;
@@ -177,9 +195,10 @@ static bool TryFromShreddedExtract(const Vector &variant_vec, const vector<Varia
 		return false;
 	}
 	// a shredded key never also appears in the unshredded part of its object, so a partially shredded vector only
-	// needs the unshredded part when the key is not shredded or a leaf has an untyped value
+	// needs to be searched in its unshredded part when the key is not shredded
 	auto &shredded_vec = ShreddedVector::GetShreddedVector(variant_vec);
-	switch (TryShreddedExtractRecursive(shredded_vec, components, result, count)) {
+	auto &unshredded_vec = ShreddedVector::GetUnshreddedVector(variant_vec);
+	switch (TryShreddedExtractRecursive(shredded_vec, unshredded_vec, components, result, count)) {
 	case ShreddedExtractResult::SUCCESS:
 		return true;
 	case ShreddedExtractResult::KEY_NOT_FOUND:
