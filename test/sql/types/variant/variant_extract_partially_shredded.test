@@ -109,6 +109,7 @@ CREATE TABLE nested_src AS SELECT i, CASE
 	WHEN i % 23 = 0 THEN 'null'::JSON::VARIANT
 	WHEN i % 29 = 0 THEN {'p': 1}::VARIANT
 	WHEN i % 31 = 0 THEN {'o': 'null'::JSON::VARIANT}::VARIANT
+	WHEN i % 37 = 0 THEN {'o': {'x': 'x' || i, 'z': 'null'::JSON::VARIANT}, 'q': 'null'::JSON::VARIANT}::VARIANT
 	ELSE {'o': {'x': 'x' || i}}::VARIANT END AS v
 FROM range(5000) t(i);
 
@@ -135,20 +136,45 @@ FROM top_shredded s JOIN top_src u USING (i);
 ----
 2967	3246	0
 
+query I
+SELECT bool_and(vector_type(v.k) = 'SHREDDED_VECTOR') FROM top_shredded;
+----
+true
+
+# Parquet stores the JSON null of 'k' as a leftover value of the shredded leaf
+statement ok
+COPY top_src TO '__TEST_DIR__/top_partially_shredded.parquet' (FORMAT parquet, SHREDDING {v: 'STRUCT(k VARCHAR, e BIGINT)'});
+
+query I
+SELECT bool_and(vector_type(v.k) = 'SHREDDED_VECTOR') FROM '__TEST_DIR__/top_partially_shredded.parquet';
+----
+true
+
 query III
-SELECT count(s.v.o.x), bool_or(vector_type(s.v.o.x) = 'SHREDDED_VECTOR'), count(*) FILTER (WHERE
-	s.v.o.x::VARCHAR IS DISTINCT FROM u.v.o.x::VARCHAR OR (s.v.o.x IS NULL) <> (u.v.o.x IS NULL))
+SELECT count(s.v.k), count(s.v.e), count(*) FILTER (WHERE
+	s.v.k::VARCHAR IS DISTINCT FROM u.v.k::VARCHAR OR (s.v.k IS NULL) <> (u.v.k IS NULL) OR
+	s.v.e::VARCHAR IS DISTINCT FROM u.v.e::VARCHAR OR (s.v.e IS NULL) <> (u.v.e IS NULL))
+FROM '__TEST_DIR__/top_partially_shredded.parquet' s JOIN top_src u USING (i);
+----
+2967	3246	0
+
+query IIIII
+SELECT count(s.v.o.x), count(s.v.o.z), count(s.v.q), bool_or(vector_type(s.v.o.x) = 'SHREDDED_VECTOR'), count(*) FILTER (WHERE
+	s.v.o.x::VARCHAR IS DISTINCT FROM u.v.o.x::VARCHAR OR (s.v.o.x IS NULL) <> (u.v.o.x IS NULL) OR
+	s.v.o.z::VARCHAR IS DISTINCT FROM u.v.o.z::VARCHAR OR (s.v.o.z IS NULL) <> (u.v.o.z IS NULL) OR
+	s.v.q::VARCHAR IS DISTINCT FROM u.v.q::VARCHAR OR (s.v.q IS NULL) <> (u.v.q IS NULL))
 FROM nested_shredded s JOIN nested_src u USING (i);
 ----
-3089	true	0
+3089	212	212	true	0
 
 statement ok
 COPY nested_src TO '__TEST_DIR__/nested_partially_shredded.parquet' (FORMAT parquet, SHREDDING {v: 'STRUCT(o STRUCT(x VARCHAR))'});
 
-query II
-SELECT count(s.v.o.x), count(*) FILTER (WHERE
+query IIII
+SELECT count(s.v.o.x), count(s.v.o.z), count(s.v.q), count(*) FILTER (WHERE
 	s.v.o.x::VARCHAR IS DISTINCT FROM u.v.o.x::VARCHAR OR (s.v.o.x IS NULL) <> (u.v.o.x IS NULL) OR
-	(s.v.o.z IS NULL) <> (u.v.o.z IS NULL) OR (s.v.q IS NULL) <> (u.v.q IS NULL))
+	s.v.o.z::VARCHAR IS DISTINCT FROM u.v.o.z::VARCHAR OR (s.v.o.z IS NULL) <> (u.v.o.z IS NULL) OR
+	s.v.q::VARCHAR IS DISTINCT FROM u.v.q::VARCHAR OR (s.v.q IS NULL) <> (u.v.q IS NULL))
 FROM '__TEST_DIR__/nested_partially_shredded.parquet' s JOIN nested_src u USING (i);
 ----
-3089	0
+3089	212	212	0
